@@ -1,122 +1,222 @@
-let DEBUG = true;
+"ui";
+
+var DEBUG = false;
+
 if (DEBUG) {
-  console.show();
-} // плавающая консоль
-
-("ui");
-auto.waitFor(); // ждём включения службы доступности
-
-// === настройки ===
-const PKG = "com.google.android.youtube";
-const OPEN_TIMEOUT = 15000; // максимум 15с ждём старт Ютуба
-const FIND_TIMEOUT = 8000; // сколько ждать элементы меню "Создать", "Загрузить видео"
-
-// ==== вспомогалки ====
-function sleepShort(ms) {
-  sleep(ms || 500);
+  try {
+    console.show();
+    console.setExitOnClose(true);
+    console.setTitle("YT uploader");
+  } catch (e) {}
 }
 
-function tapCenter(node) {
-  if (!node) return false;
-  let b = node.bounds();
-  click(b.centerX(), b.centerY());
-  return true;
+if (!auto.service) {
+  toastLog("⚠️ Включи Laixi в Accessibility и перезапусти скрипт.");
+  sleep(2000);
+  exit();
 }
 
-function findOneOf(fns, timeout) {
-  let end = Date.now() + (timeout || FIND_TIMEOUT);
-  while (Date.now() < end) {
-    for (let fn of fns) {
-      let n = fn();
-      if (n) return n;
+auto.waitFor();
+
+var PKG = "com.google.android.youtube";
+var OPEN_DELAY_MS = 6000;
+var CREATE_TIMEOUT = 12000;
+var UPLOAD_TIMEOUT = 12000;
+var POLL_INTERVAL_MS = 400;
+
+// Переводи каждый шаг в true постепенно.
+
+var CREATE_MATCHERS = [
+  function () {
+    return idMatches(/fab|create_button|create_icon|button_create/i).findOne(
+      200,
+    );
+  },
+  function () {
+    return descMatches(
+      /create|\u0441\u043E\u0437\u0434\u0430\u0442\u044C|crear|cr(?:e|\u00E9)er|crear contenido|schaffen|criar/i,
+    ).findOne(200);
+  },
+  function () {
+    return textMatches(
+      /create|\u0441\u043E\u0437\u0434\u0430\u0442\u044C|crear|cr(?:e|\u00E9)er|create a short/i,
+    ).findOne(200);
+  },
+  function () {
+    return descContains("+").findOne(200);
+  },
+];
+
+var UPLOAD_MATCHERS = [
+  function () {
+    return textMatches(
+      /upload( (a )?video)?|\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0432\u0438\u0434\u0435\u043E|subir video|t(?:ai|\u1EA3i) video|t(?:e|\u00E9)l(?:e|\u00E9)charger|hochladen/i,
+    ).findOne(200);
+  },
+  function () {
+    return descMatches(
+      /upload( (a )?video)?|\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C \u0432\u0438\u0434\u0435\u043E|subir video|t(?:ai|\u1EA3i) video|hochladen/i,
+    ).findOne(200);
+  },
+  function () {
+    return idMatches(
+      /upload|new_post|create_dialog_upload|create_dialog_shorts/i,
+    ).findOne(200);
+  },
+  function () {
+    return textContains("Upload").findOne(200);
+  },
+];
+
+function runSteps() {
+  toastLog("runSteps entered");
+  try {
+    toastLog("Before ensureYouTubeOpen()");
+    ensureYouTubeOpen();
+    toastLog("After ensureYouTubeOpen()");
+
+    toastLog("Waiting for the app to load.");
+    sleep(OPEN_DELAY_MS);
+
+    toastLog("Looking for the create button (step 2).");
+    var createClicked = clickAny(CREATE_MATCHERS, CREATE_TIMEOUT);
+    toastLog("clickAny CREATE result=" + createClicked);
+    sleep(700);
+
+    toastLog("Looking for the upload option (step 3).");
+    var uploadClicked = clickAny(UPLOAD_MATCHERS, UPLOAD_TIMEOUT);
+    toastLog("clickAny UPLOAD result=" + uploadClicked);
+
+    toastLog("Done: upload option pressed.");
+  } catch (err) {
+    var message = err && err.message ? err.message : err;
+    toastLog("Error: " + message);
+    if (DEBUG) {
+      try {
+        console.error(err);
+      } catch (e) {}
     }
-    sleep(300);
+  } finally {
+    finish();
+  }
+}
+
+function finish() {
+  toastLog("Script finished.");
+  setTimeout(function () {
+    exit();
+  }, 300);
+}
+
+function ensureYouTubeOpen() {
+  var currentPkg = currentPackage();
+  toastLog("ensureYouTubeOpen start, currentPackage=" + currentPkg);
+  if (currentPkg !== PKG) {
+    toastLog("Trying to launch via adb shell am start.");
+    var cmd = "am start -n " + PKG + "/com.google.android.youtube.HomeActivity";
+    var result = shell(cmd);
+    toastLog("am start exit=" + result.code);
+    if (result.stdout) {
+      toastLog("am start stdout: " + result.stdout);
+    }
+    if (result.stderr) {
+      toastLog("am start stderr: " + result.stderr);
+    }
+
+    var detected = waitForPackage(PKG, 5000);
+    if (detected) {
+      toastLog("YouTube detected after am start.");
+    } else {
+      toastLog("YouTube still not in foreground, trying launchApp fallback.");
+      var launched =
+        safeLaunchByName("YouTube") ||
+        safeLaunchByName("\u042e\u0442\u0443\u0431");
+      toastLog("fallback launchApp result=" + launched);
+      if (!launched) {
+        toastLog("Open YouTube manually and rerun.");
+      }
+    }
+  }
+  sleep(3000);
+}
+
+function safeLaunchByName(name) {
+  try {
+    return launchApp(name);
+  } catch (e) {
+    return false;
+  }
+}
+
+function clickAny(matchers, timeout) {
+  var node = waitForNode(matchers, timeout || 0);
+  if (!node) {
+    return false;
+  }
+  return tryClickChain(node);
+}
+
+function waitForNode(matchers, timeout) {
+  var deadline = Date.now() + Math.max(timeout, 0);
+  while (Date.now() < deadline) {
+    for (var i = 0; i < matchers.length; i++) {
+      var found = null;
+      try {
+        found = matchers[i]();
+      } catch (e) {
+        found = null;
+      }
+      if (found) {
+        return found;
+      }
+    }
+    sleep(POLL_INTERVAL_MS);
   }
   return null;
 }
 
-function tryClickOneOf(fns, timeout) {
-  let n = findOneOf(fns, timeout);
-  if (n) return tapCenter(n);
+function tryClickChain(node) {
+  var current = node;
+  for (var depth = 0; depth < 3 && current; depth++) {
+    if (clickNode(current)) {
+      return true;
+    }
+    current = current.parent ? current.parent() : null;
+  }
   return false;
 }
 
-// === шаг 1: запускаем YouTube ===
-if (!app.launchPackage(PKG)) {
-  toastLog("Не смог запустить YouTube, пробую через название...");
-  if (!launchApp("YouTube") && !launchApp("Ютуб")) {
-    toastLog("YouTube не найден. Установлен ли он?");
-    exit();
+function clickNode(node) {
+  if (!node) {
+    return false;
+  }
+  try {
+    if (node.click && node.click()) {
+      return true;
+    }
+  } catch (e) {}
+  try {
+    var bounds = node.bounds();
+    if (!bounds) {
+      return false;
+    }
+    return click(bounds.centerX(), bounds.centerY());
+  } catch (e) {
+    return false;
   }
 }
-toastLog("Открываю YouTube…");
 
-// ждём, пока действительно открылся
-waitForActivity(null, OPEN_TIMEOUT);
-
-toastLog("YouTube Открылся!");
-
-// === шаг 2: нажать кнопку «Создать» (иконка +) ===
-// Пробуем разные варианты: content-desc, id, текст.
-let clickedCreate = tryClickOneOf(
-  [
-    () =>
-      descMatches(/Create|Создать/i)
-        .clickable()
-        .findOne(50),
-    () =>
-      idMatches(/fab|create|upload|button_create/i)
-        .clickable()
-        .findOne(50),
-    () =>
-      textMatches(/Create|Создать/i)
-        .clickable()
-        .findOne(50),
-    () =>
-      className("android.widget.ImageView")
-        .descMatches(/\+|Create|Создать/i)
-        .clickable()
-        .findOne(50),
-    () =>
-      className("android.widget.FrameLayout")
-        .descMatches(/Create|Создать/i)
-        .findOne(50),
-  ],
-  FIND_TIMEOUT,
-);
-
-if (!clickedCreate) {
-  toastLog(
-    "Не нашёл кнопку «Создать» (+). Проверь, что YouTube открыт на главной.",
-  );
-  exit();
-}
-toastLog("Открыл меню «Создать».");
-sleepShort(700);
-
-// === шаг 3: выбрать «Загрузить видео» ===
-let clickedUpload = tryClickOneOf(
-  [
-    () =>
-      textMatches(/Upload a video|Загрузить видео/i)
-        .clickable()
-        .findOne(50),
-    () =>
-      descMatches(/Upload a video|Загрузить видео/i)
-        .clickable()
-        .findOne(50),
-    // иногда пункты меню приходят как дочерние; попробуем по contains:
-    () => textContains("Upload").clickable().findOne(50),
-    () => textContains("Загруз").clickable().findOne(50),
-  ],
-  FIND_TIMEOUT,
-);
-
-if (!clickedUpload) {
-  toastLog(
-    "Не нашёл пункт «Загрузить видео». Возможно, открыт другой аккаунт/экран.",
-  );
-  exit();
+function waitForPackage(name, timeout) {
+  var deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (currentPackage() === name) {
+      return true;
+    }
+    sleep(300);
+  }
+  return false;
 }
 
-toastLog("Открыт экран выбора видео для загрузки ✅");
+threads.start(function () {
+  runSteps();
+});
